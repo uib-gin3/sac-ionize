@@ -1,0 +1,13 @@
+#!/bin/sh
+# Load the dataset into Ozone as ofs://om/goodreads/dataset and list it back.
+# The om container has the dataset mounted read-only at /dataset, so the load
+# runs inside it. Volume and bucket are created when missing (ozone fs
+# -mkdir -p is idempotent) and the keys are overwritten, so this can be re-run.
+set -eu
+
+VOLUME=${1:-goodreads}
+BUCKET=${2:-dataset}
+URI="ofs://om/$VOLUME/$BUCKET"
+
+# The glob has to expand inside the container, where /dataset is mounted.
+docker compose exec -T om sh -c "ozone fs -mkdir -p '$URI' && ozone fs -put -f /dataset/*.csv '$URI/' && ozone fs -ls '$URI'"

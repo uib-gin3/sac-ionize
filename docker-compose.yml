@@ -1,0 +1,176 @@
+# Ionize: an Apache Ozone cluster (scm, om, recon and 3 datanodes) and an
+# Apache Spark cluster (a master and 3 workers) able to read the Ozone data
+# through ofs://. The dataset directory is mounted read-only where it gets
+# loaded from (om) and where the RDD work happens (the spark containers).
+#
+# Sized for a laptop: Ozone heaps and Spark memory are tuned down and every
+# container has a hard memory cap (mem_limit = memswap_limit, so a hungry
+# container is OOM-killed instead of eating the host).
+#
+# The cluster data lives in ./data, relative to this file, so the whole repo
+# is portable: clone it anywhere and the data follows (and can be seen with
+# plain ls). data-init runs first and leaves ./data owned by uid 1000, the
+# hadoop user inside the Ozone containers, whoever clones it.
+
+x-ozone-config: &ozone-config
+  OZONE-SITE.XML_hdds.datanode.dir: /data/hdds
+  OZONE-SITE.XML_ozone.metadata.dirs: /data/metadata
+  OZONE-SITE.XML_ozone.om.address: om
+  OZONE-SITE.XML_ozone.om.http-address: om:9874
+  OZONE-SITE.XML_ozone.recon.address: recon:9891
+  OZONE-SITE.XML_ozone.recon.db.dir: /data/metadata/recon
+  OZONE-SITE.XML_ozone.replication: "3"
+  OZONE-SITE.XML_ozone.scm.block.client.address: scm
+  OZONE-SITE.XML_ozone.scm.client.address: scm
+  OZONE-SITE.XML_ozone.scm.datanode.id.dir: /data/metadata
+  OZONE-SITE.XML_ozone.scm.names: scm
+  # Register the datanodes by hostname (datanode1...), not by the container
+  # IP: docker assigns fresh IPs on every boot, but ratis persists the peer
+  # addresses of its pipelines, so IP churn would leave them orphaned.
+  OZONE-SITE.XML_hdds.datanode.use.datanode.hostname: "true"
+  # Speeds up every boot: the first RATIS/THREE pipeline forms in seconds, so
+  # SCM leaves safe mode (and the cluster becomes writable) without waiting
+  # for the 2-minute default creation cycle.
+  OZONE-SITE.XML_ozone.scm.pipeline.creation.interval: "15s"
+  no_proxy: "om,recon,scm,localhost,127.0.0.1"
+
+x-ozone: &ozone
+  image: apache/ozone:2.2.2
+  mem_limit: 1536m
+  memswap_limit: 1536m
+  environment: *ozone-config
+
+x-spark: &spark
+  build: .
+  mem_limit: 1536m
+  memswap_limit: 1536m
+  volumes:
+    - ./dataset:/dataset:ro
+  environment:
+    SPARK_DAEMON_MEMORY: 512m
+    SPARK_WORKER_CORES: "2"
+    SPARK_WORKER_MEMORY: 1g
+
+services:
+  data-init:
+    image: apache/ozone:2.2.2
+    user: "0:0"
+    entrypoint: ["sh", "-c", "mkdir -p /data/scm /data/om /data/recon /data/dn1 /data/dn2 /data/dn3 && chown -R 1000:1000 /data && echo 'data ready'"]
+    volumes:
+      - ./data:/data
+
+  scm:
+    <<: *ozone
+    hostname: scm
+    command: ["ozone", "scm"]
+    depends_on:
+      data-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *ozone-config
+      # Ozone heap, tuned for a laptop (MB); the container runs one role only.
+      OZONE_HEAPSIZE: "1024"
+      ENSURE_SCM_INITIALIZED: /data/metadata/scm/current/VERSION
+    ports:
+      - "9876:9876"   # web ui
+    volumes:
+      - ./data/scm:/data/metadata
+
+  om:
+    <<: *ozone
+    hostname: om
+    command: ["ozone", "om"]
+    depends_on: [scm]
+    environment:
+      <<: *ozone-config
+      OZONE_HEAPSIZE: "1024"
+      ENSURE_OM_INITIALIZED: /data/metadata/om/current/VERSION
+      WAITFOR: scm:9876
+    ports:
+      - "9874:9874"   # web ui
+    volumes:
+      - ./data/om:/data/metadata
+      - ./dataset:/dataset:ro
+
+  recon:
+    <<: *ozone
+    hostname: recon
+    command: ["ozone", "recon"]
+    depends_on: [scm, om]
+    environment:
+      <<: *ozone-config
+      OZONE_HEAPSIZE: "512"
+      WAITFOR: om:9874
+    mem_limit: 768m
+    memswap_limit: 768m
+    ports:
+      - "9888:9888"   # web ui
+    volumes:
+      - ./data/recon:/data/metadata
+
+  datanode1:
+    <<: *ozone
+    hostname: datanode1
+    command: ["ozone", "datanode"]
+    depends_on: [scm]
+    environment:
+      <<: *ozone-config
+      OZONE_HEAPSIZE: "1024"
+    volumes:
+      - ./data/dn1:/data
+
+  datanode2:
+    <<: *ozone
+    hostname: datanode2
+    command: ["ozone", "datanode"]
+    depends_on: [scm]
+    environment:
+      <<: *ozone-config
+      OZONE_HEAPSIZE: "1024"
+    volumes:
+      - ./data/dn2:/data
+
+  datanode3:
+    <<: *ozone
+    hostname: datanode3
+    command: ["ozone", "datanode"]
+    depends_on: [scm]
+    environment:
+      <<: *ozone-config
+      OZONE_HEAPSIZE: "1024"
+    volumes:
+      - ./data/dn3:/data
+
+  spark-master:
+    <<: *spark
+    hostname: spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    mem_limit: 768m
+    memswap_limit: 768m
+    ports:
+      - "7077:7077"   # spark master rpc
+      - "8080:8080"   # web ui
+
+  spark-worker-1:
+    <<: *spark
+    hostname: spark-worker-1
+    depends_on: [spark-master]
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    ports:
+      - "8081:8081"   # web ui
+
+  spark-worker-2:
+    <<: *spark
+    hostname: spark-worker-2
+    depends_on: [spark-master]
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    ports:
+      - "8082:8081"   # web ui
+
+  spark-worker-3:
+    <<: *spark
+    hostname: spark-worker-3
+    depends_on: [spark-master]
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    ports:
+      - "8083:8081"   # web ui

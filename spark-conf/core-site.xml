@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!-- Points Spark at the Ozone cluster: the ofs scheme rooted at OM.
+     With fs.defaultFS set, plain paths like /goodreads/dataset/reviews.csv
+     already land in Ozone; ofs://om/... works everywhere too. -->
+<configuration>
+  <property>
+    <name>fs.ofs.impl</name>
+    <value>org.apache.hadoop.fs.ozone.RootedOzoneFileSystem</value>
+  </property>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>ofs://om/</value>
+  </property>
+  <property>
+    <name>ozone.om.address</name>
+    <value>om</value>
+  </property>
+</configuration>

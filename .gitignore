@@ -1,0 +1,6 @@
+# Cluster data (bind mounts from docker-compose.yml): Ozone metadata,
+# datanode containers, recon db...
+/data/
+
+# If Docker's data-root is ever pointed into this repository
+/docker-data/
